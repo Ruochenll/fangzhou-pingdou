@@ -110,6 +110,31 @@ class MainWindow(QMainWindow):
         ll = QVBoxLayout(left)
         self.canvas = PixelCanvasView(GRID_SIZE)
         ll.addWidget(self.canvas)
+
+        # 全局预览小图：原图 | 像素化整体效果（无网格）
+        thumbs = QHBoxLayout()
+        self.lbl_thumb_orig = QLabel("原图")
+        self.lbl_thumb_orig.setAlignment(Qt.AlignCenter)
+        self.lbl_thumb_orig.setMinimumHeight(96)
+        self.lbl_thumb_orig.setStyleSheet("color: #888;")
+        self.lbl_thumb_pixel = QLabel("整体效果")
+        self.lbl_thumb_pixel.setAlignment(Qt.AlignCenter)
+        self.lbl_thumb_pixel.setMinimumHeight(96)
+        self.lbl_thumb_pixel.setStyleSheet("color: #888;")
+        orig_box = QVBoxLayout()
+        orig_cap = QLabel("原图")
+        orig_cap.setAlignment(Qt.AlignCenter)
+        orig_box.addWidget(orig_cap)
+        orig_box.addWidget(self.lbl_thumb_orig)
+        pixel_box = QVBoxLayout()
+        pixel_cap = QLabel("整体效果")
+        pixel_cap.setAlignment(Qt.AlignCenter)
+        pixel_box.addWidget(pixel_cap)
+        pixel_box.addWidget(self.lbl_thumb_pixel)
+        thumbs.addLayout(orig_box)
+        thumbs.addLayout(pixel_box)
+        ll.addLayout(thumbs)
+
         self.lbl_info = QLabel("未加载图片")
         self.lbl_info.setAlignment(Qt.AlignCenter)
         ll.addWidget(self.lbl_info)
@@ -204,6 +229,34 @@ class MainWindow(QMainWindow):
         self.lbl_info.setText(
             f"{os.path.basename(self._last_path)} → {len(needed)} 种颜色"
             + (f"，{n_warn} 格色差较大（红框，将用最近色）" if n_warn else ""))
+        self._update_thumbs()
+
+    def _update_thumbs(self) -> None:
+        """刷新网格图下方的全局预览小图：左原图、右像素化整体效果。"""
+        path = getattr(self, "_last_path", None)
+        if path:
+            pix = QPixmap(path)
+            if not pix.isNull():
+                pix = pix.scaled(210, 96, Qt.KeepAspectRatio,
+                                 Qt.SmoothTransformation)
+                self.lbl_thumb_orig.setPixmap(pix)
+            else:
+                self.lbl_thumb_orig.setText("原图加载失败")
+        else:
+            self.lbl_thumb_orig.setPixmap(QPixmap())
+            self.lbl_thumb_orig.setText("原图")
+
+        if self.match is not None and self.palette is not None:
+            mapped = self.palette.rgb[self.match.indices].astype(np.uint8)
+            arr = np.ascontiguousarray(mapped)
+            qimg = QImage(arr.data, GRID_SIZE, GRID_SIZE,
+                          GRID_SIZE * 3, QImage.Format_RGB888).copy()
+            pix = QPixmap.fromImage(qimg).scaled(
+                210, 96, Qt.KeepAspectRatio, Qt.FastTransformation)
+            self.lbl_thumb_pixel.setPixmap(pix)
+        else:
+            self.lbl_thumb_pixel.setPixmap(QPixmap())
+            self.lbl_thumb_pixel.setText("整体效果")
 
     # ---------- ② 框选区域 ----------
     def on_pick_roi(self) -> None:
