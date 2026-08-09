@@ -6,7 +6,7 @@ import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QFileDialog, QHBoxLayout, QLabel, QMainWindow,
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
 from config import DEBUG_DIR, GRID_SIZE, AppConfig, Region
 from core.color_matcher import PaletteMatcher
 from core.grid_locator import locate_grid
-from core.image_processor import load_and_downsample
+from core.image_processor import ImageSampler
 from core.palette_data import KnownPalette
 from core.palette_scanner import PaletteScanner
 from core.painter import PaintWorker
@@ -43,6 +43,11 @@ class MainWindow(QMainWindow):
         self.worker: PaintWorker | None = None
         self.white_idx = -1
         self._selector: RegionSelector | None = None
+        self._sampler = ImageSampler()          # 预处理缓存：调参不重复读图
+        self._debounce = QTimer(self)           # 采样参数防抖：拖完才重算
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(200)
+        self._debounce.timeout.connect(self._apply_sampling)
 
         self._build_ui()
         self._setup_hotkey()
@@ -75,6 +80,12 @@ class MainWindow(QMainWindow):
         self.chk_skip_white = QCheckBox("跳过纯白格（画布默认白底）")
         self.chk_skip_white.setChecked(True)
         bar.addWidget(self.chk_skip_white)
+        self.chk_protect_gray = QCheckBox("灰色保护")
+        self.chk_protect_gray.setChecked(True)
+        self.chk_protect_gray.setToolTip(
+            "低饱和灰色只匹配色板中的灰色系（色板 L*30~65 无灰色档，"
+            "不保护时中灰会被匹配成褐色）")
+        bar.addWidget(self.chk_protect_gray)
 
         bar.addWidget(QLabel(" 采样:"))
         self.cmb_mode = QComboBox()
@@ -106,6 +117,8 @@ class MainWindow(QMainWindow):
         # 采样参数变化 → 若已导入图片则重新采样预览
         self.cmb_mode.currentIndexChanged.connect(self._on_sampling_changed)
         self.sld_sharpen.valueChanged.connect(self._on_sampling_changed)
+        # 灰色保护只影响匹配，不重采样
+        self.chk_protect_gray.toggled.connect(self._refresh_preview)
 
         split = QSplitter()
         left = QWidget()
@@ -180,16 +193,21 @@ class MainWindow(QMainWindow):
         return self.sld_sharpen.value() / 10.0
 
     def _on_sampling_changed(self) -> None:
-        """采样模式/锐化变化 → 用已导入图片重新采样并刷新预览。"""
+        """采样模式/锐化变化 → 防抖 200ms 后重采样（拖动滑块不会连续触发）。"""
         if self.pixels is None or not getattr(self, "_last_path", None):
             return
-        self.pixels = load_and_downsample(
+        self._debounce.start()
+
+    def _apply_sampling(self) -> None:
+        """防抖到期后真正执行重采样（ImageSampler 有预处理缓存，很快）。"""
+        self.pixels = self._sampler.sample(
             self._last_path, GRID_SIZE,
             mode=self._sampling_mode(),
             sharpen=self._sharpen_amount(),
-            palette_rgb=self.palette.rgb if self.palette is not None else None)
-        self.log(f"采样参数已更新：{self._sampling_mode()}，锐化 "
-                 f"{self._sharpen_amount():.1f} → 重新预览")
+            palette_rgb=self.palette.rgb if self.palette is not None else None,
+            protect_gray=self.chk_protect_gray.isChecked())
+        self.log(f"采样参数：{self._sampling_mode()}，锐化 "
+                 f"{self._sharpen_amount():.1f}")
         self._refresh_preview()
 
     def on_import(self) -> None:
@@ -203,11 +221,12 @@ class MainWindow(QMainWindow):
             return
 
         self._last_path = path
-        self.pixels = load_and_downsample(
+        self.pixels = self._sampler.sample(
             path, GRID_SIZE,
             mode=self._sampling_mode(),
             sharpen=self._sharpen_amount(),
-            palette_rgb=self.palette.rgb)
+            palette_rgb=self.palette.rgb,
+            protect_gray=self.chk_protect_gray.isChecked())
         self.log(f"已加载图片：{path}（采样 {self._sampling_mode()}，锐化 "
                  f"{self._sharpen_amount():.1f}）")
         self._refresh_preview()
@@ -216,7 +235,8 @@ class MainWindow(QMainWindow):
         """用当前 pixels 刷新 24×24 预览 + 色块清单（导入与参数变化共用）。"""
         if self.pixels is None or self.palette is None:
             return
-        matcher = PaletteMatcher(self.palette.rgb, self.cfg.match_threshold)
+        matcher = PaletteMatcher(self.palette.rgb, self.cfg.match_threshold,
+                                 protect_gray=self.chk_protect_gray.isChecked())
         self.match = matcher.match(self.pixels)
         self.white_idx = self.palette.whitest_index
 

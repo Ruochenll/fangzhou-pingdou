@@ -121,7 +121,10 @@ def _outline_mask(img: Image.Image, size: int,
 
 def _kmeans_quantize(img: Image.Image, k: int = 16) -> Image.Image:
     """全图 k-means 预量化到 k 色：消除照片纹理噪声，让后续采样时
-    每格的"主体颜色"更明确。返回 PIL Image。"""
+    每格的"主体颜色"更明确。先缩到 ≤240px 使耗时与原图尺寸无关。
+    返回 PIL Image。"""
+    if max(img.size) > 240:
+        img = img.resize((240, 240), Image.LANCZOS)
     arr = np.asarray(img, dtype=np.float32)
     Z = arr.reshape(-1, 3)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
@@ -132,16 +135,24 @@ def _kmeans_quantize(img: Image.Image, k: int = 16) -> Image.Image:
 
 
 def _dither_to_palette(arr_rgb: np.ndarray,
-                       palette_rgb: np.ndarray) -> np.ndarray:
+                       palette_rgb: np.ndarray,
+                       protect_gray: bool = True) -> np.ndarray:
     """Floyd-Steinberg 误差扩散：把 (H,W,3) 图量化到色板。
 
     每格的量化误差扩散到右/左下/下/右下相邻格，用 40 色板的空间
     组合模拟中间色——渐变与肤色在 24×24 下的经典解法。
-    距离用 CIEDE2000 + 1.2×亮度加权，与色板匹配口径一致。
+    距离用 CIEDE2000 + 1.2×亮度加权，与色板匹配口径一致；
+    protect_gray 与 PaletteMatcher 的灰度保护规则一致。
     """
     h, w = arr_rgb.shape[:2]
     pal = palette_rgb.astype(np.float64)
     pal_lab = rgb_to_lab(pal)
+    pal_chroma = np.hypot(pal_lab[:, 1], pal_lab[:, 2])
+    gray_idx = np.where(pal_chroma < 12.0)[0]
+    # 灰度保护的判定必须用原始像素色度：扩散误差会把中间态像素
+    # 推出低色度区，导致保护中途失效、又匹配回褐色
+    orig_lab = rgb_to_lab(arr_rgb.reshape(-1, 3)).reshape(h, w, 3)
+    orig_chroma = np.hypot(orig_lab[..., 1], orig_lab[..., 2])
     out = arr_rgb.astype(np.float64).copy()
     res = np.zeros((h, w, 3), dtype=np.float64)
     for y in range(h):
@@ -152,7 +163,11 @@ def _dither_to_palette(arr_rgb: np.ndarray,
             old_lab = rgb_to_lab(old.reshape(1, 3))[0]
             d = delta_e_2000(old_lab, pal_lab)
             d_eff = d + 1.2 * np.abs(old_lab[0] - pal_lab[:, 0])
-            idx = int(np.argmin(d_eff))
+            if (protect_gray and len(gray_idx) > 0
+                    and orig_chroma[y, x] < 10.0):
+                idx = int(gray_idx[int(np.argmin(d_eff[gray_idx]))])
+            else:
+                idx = int(np.argmin(d_eff))
             res[y, x] = pal[idx]
             err = old - pal[idx]
             if x + 1 < w:
@@ -173,36 +188,65 @@ def load_and_downsample(path: str, size: int = 24, mode: str = "balanced",
 
     mode 取值见模块 docstring。classic 完全保持旧行为（直接 LANCZOS，
     不经任何预处理），用于回退对照；dither 模式必须传 palette_rgb。
+    需要反复调参重采样时，请用 ImageSampler（带预处理缓存）。
     """
-    if mode not in _MODES:
-        mode = "balanced"
+    return ImageSampler().sample(path, size, mode, sharpen, contrast,
+                                 palette_rgb)
 
-    if mode == "classic":
-        img = Image.open(path).convert("RGB")
-        return np.asarray(img.resize((size, size), Image.LANCZOS),
-                          dtype=np.uint8)
 
-    if mode == "dither" and palette_rgb is None:
-        raise ValueError("dither 模式需要色板 palette_rgb")
+class ImageSampler:
+    """带预处理缓存的采样器。
 
-    img = Image.open(path).convert("RGB")
-    img = _center_crop_square(img)
+    同一张图反复调参（锐化/模式）时，读图 + 裁剪 + 对比度只算一次；
+    预处理中间图限制在 480px，各阶段耗时与原图尺寸无关
+    （majority 缩到 240、kmeans 缩到 240、dither 直接用 24）。
+    """
 
-    arr = np.asarray(img, dtype=np.float64)
-    arr = _auto_contrast(arr, amount=contrast)
-    img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
-    img = _sharpen(img, amount=sharpen)
+    def __init__(self) -> None:
+        self._key: tuple | None = None
+        self._base: Image.Image | None = None
 
-    if mode == "kmeans":
-        img = _kmeans_quantize(img, k=16)
+    def _preprocessed(self, path: str, contrast: float) -> Image.Image:
+        key = (path, contrast)
+        if key != self._key or self._base is None:
+            img = Image.open(path).convert("RGB")
+            img = _center_crop_square(img)
+            if max(img.size) > 480:
+                img = img.resize((480, 480), Image.LANCZOS)
+            arr = _auto_contrast(np.asarray(img, dtype=np.float64), contrast)
+            self._base = Image.fromarray(
+                np.clip(arr, 0, 255).astype(np.uint8))
+            self._key = key
+        return self._base
 
-    if mode == "dither":
-        base = np.asarray(img.resize((size, size), Image.LANCZOS),
-                          dtype=np.float64)
-        out = _dither_to_palette(base, palette_rgb)
-    else:
-        out = _majority_sampling(img, size)
-        if mode == "outline":
-            mask = _outline_mask(img, size)
-            out[mask] = (20, 20, 20)  # 深灰，匹配时归入色板黑色系
-    return np.clip(out, 0, 255).astype(np.uint8)
+    def sample(self, path: str, size: int = 24, mode: str = "balanced",
+               sharpen: float = 0.8, contrast: float = 1.0,
+               palette_rgb: np.ndarray | None = None,
+               protect_gray: bool = True) -> np.ndarray:
+        if mode not in _MODES:
+            mode = "balanced"
+
+        if mode == "classic":
+            img = Image.open(path).convert("RGB")
+            return np.asarray(img.resize((size, size), Image.LANCZOS),
+                              dtype=np.uint8)
+
+        if mode == "dither" and palette_rgb is None:
+            raise ValueError("dither 模式需要色板 palette_rgb")
+
+        img = self._preprocessed(path, contrast)
+        img = _sharpen(img, amount=sharpen)
+
+        if mode == "kmeans":
+            img = _kmeans_quantize(img, k=16)
+
+        if mode == "dither":
+            base = np.asarray(img.resize((size, size), Image.LANCZOS),
+                              dtype=np.float64)
+            out = _dither_to_palette(base, palette_rgb, protect_gray)
+        else:
+            out = _majority_sampling(img, size)
+            if mode == "outline":
+                mask = _outline_mask(img, size)
+                out[mask] = (20, 20, 20)  # 深灰，匹配时归入色板黑色系
+        return np.clip(out, 0, 255).astype(np.uint8)
