@@ -23,3 +23,5 @@ debug/
 # 系统文件
 Thumbs.db
 Desktop.ini
+build_v3/
+dist_v3/
