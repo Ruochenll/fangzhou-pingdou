@@ -81,10 +81,10 @@ class MainWindow(QMainWindow):
         self.chk_skip_white.setChecked(True)
         bar.addWidget(self.chk_skip_white)
         self.chk_protect_gray = QCheckBox("灰色保护")
-        self.chk_protect_gray.setChecked(True)
+        self.chk_protect_gray.setChecked(False)
         self.chk_protect_gray.setToolTip(
             "低饱和灰色只匹配色板中的灰色系（色板 L*30~65 无灰色档，"
-            "不保护时中灰会被匹配成褐色）")
+            "开启后中灰不会被匹配成褐色，但浅灰可能偏暗）")
         bar.addWidget(self.chk_protect_gray)
 
         bar.addWidget(QLabel(" 采样:"))
