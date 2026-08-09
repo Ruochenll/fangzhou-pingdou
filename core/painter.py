@@ -127,8 +127,15 @@ class PaintWorker(QThread):
 
             roi_img = cap.grab_region(self.roi)
             visible = scanner.scan(roi_img)
+            if len(visible) < 4:
+                # 可能是滚动动画未稳定导致识别过少，等一拍重扫
+                sleep_ms(300)
+                visible = scanner.scan(cap.grab_region(self.roi))
             new_colors = set(visible.keys()) - seen_all
             seen_all |= set(visible.keys())
+            self.log.emit(
+                f"第 {round_no + 1} 轮：可见 {len(visible)} 色，"
+                f"新增 {len(new_colors)}，剩余 {len(remaining)} 格")
 
             for idx in sorted(self.plan.keys()):
                 if self._stop or not remaining:
