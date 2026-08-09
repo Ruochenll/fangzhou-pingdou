@@ -80,6 +80,8 @@ class MainWindow(QMainWindow):
         self.cmb_mode = QComboBox()
         self.cmb_mode.addItem("主色均衡（推荐）", "balanced")
         self.cmb_mode.addItem("线稿描边", "outline")
+        self.cmb_mode.addItem("聚类量化（照片/复杂图）", "kmeans")
+        self.cmb_mode.addItem("抖动扩散（渐变/肤色）", "dither")
         self.cmb_mode.addItem("经典 LANCZOS", "classic")
         bar.addWidget(self.cmb_mode)
         bar.addWidget(QLabel("锐化:"))
@@ -184,7 +186,8 @@ class MainWindow(QMainWindow):
         self.pixels = load_and_downsample(
             self._last_path, GRID_SIZE,
             mode=self._sampling_mode(),
-            sharpen=self._sharpen_amount())
+            sharpen=self._sharpen_amount(),
+            palette_rgb=self.palette.rgb if self.palette is not None else None)
         self.log(f"采样参数已更新：{self._sampling_mode()}，锐化 "
                  f"{self._sharpen_amount():.1f} → 重新预览")
         self._refresh_preview()
@@ -203,7 +206,8 @@ class MainWindow(QMainWindow):
         self.pixels = load_and_downsample(
             path, GRID_SIZE,
             mode=self._sampling_mode(),
-            sharpen=self._sharpen_amount())
+            sharpen=self._sharpen_amount(),
+            palette_rgb=self.palette.rgb)
         self.log(f"已加载图片：{path}（采样 {self._sampling_mode()}，锐化 "
                  f"{self._sharpen_amount():.1f}）")
         self._refresh_preview()
