@@ -8,10 +8,11 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QRect, Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
-                               QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
-                               QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QScrollArea, QSlider, QSplitter, QVBoxLayout,
+                               QWidget)
 
 from config import DEBUG_DIR, GRID_SIZE, AppConfig, Region
 from core.color_matcher import PaletteMatcher
@@ -73,10 +74,24 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.chk_skip_white = QCheckBox("跳过纯白格（画布默认白底）")
         self.chk_skip_white.setChecked(True)
+        bar.addWidget(self.chk_skip_white)
+
+        bar.addWidget(QLabel(" 采样:"))
+        self.cmb_mode = QComboBox()
+        self.cmb_mode.addItem("主色均衡（推荐）", "balanced")
+        self.cmb_mode.addItem("线稿描边", "outline")
+        self.cmb_mode.addItem("经典 LANCZOS", "classic")
+        bar.addWidget(self.cmb_mode)
+        bar.addWidget(QLabel("锐化:"))
+        self.sld_sharpen = QSlider(Qt.Horizontal)
+        self.sld_sharpen.setRange(0, 15)
+        self.sld_sharpen.setValue(8)
+        self.sld_sharpen.setFixedWidth(90)
+        bar.addWidget(self.sld_sharpen)
+
         for b in (self.btn_import, self.btn_roi, self.btn_detect,
                   self.btn_test, self.btn_start, self.btn_stop):
             bar.addWidget(b)
-        bar.addWidget(self.chk_skip_white)
         bar.addStretch(1)
         root.addLayout(bar)
 
@@ -86,6 +101,9 @@ class MainWindow(QMainWindow):
         self.btn_test.clicked.connect(self.on_test_click)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_stop.clicked.connect(self.on_stop)
+        # 采样参数变化 → 若已导入图片则重新采样预览
+        self.cmb_mode.currentIndexChanged.connect(self._on_sampling_changed)
+        self.sld_sharpen.valueChanged.connect(self._on_sampling_changed)
 
         split = QSplitter()
         left = QWidget()
@@ -128,6 +146,24 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(msg)
 
     # ---------- ① 导入图片 ----------
+    def _sampling_mode(self) -> str:
+        return str(self.cmb_mode.currentData()) if self.cmb_mode else "balanced"
+
+    def _sharpen_amount(self) -> float:
+        return self.sld_sharpen.value() / 10.0
+
+    def _on_sampling_changed(self) -> None:
+        """采样模式/锐化变化 → 用已导入图片重新采样并刷新预览。"""
+        if self.pixels is None or not getattr(self, "_last_path", None):
+            return
+        self.pixels = load_and_downsample(
+            self._last_path, GRID_SIZE,
+            mode=self._sampling_mode(),
+            sharpen=self._sharpen_amount())
+        self.log(f"采样参数已更新：{self._sampling_mode()}，锐化 "
+                 f"{self._sharpen_amount():.1f} → 重新预览")
+        self._refresh_preview()
+
     def on_import(self) -> None:
         if self.palette is None:
             QMessageBox.warning(self, "缺少色板",
@@ -138,7 +174,19 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        self.pixels = load_and_downsample(path, GRID_SIZE)
+        self._last_path = path
+        self.pixels = load_and_downsample(
+            path, GRID_SIZE,
+            mode=self._sampling_mode(),
+            sharpen=self._sharpen_amount())
+        self.log(f"已加载图片：{path}（采样 {self._sampling_mode()}，锐化 "
+                 f"{self._sharpen_amount():.1f}）")
+        self._refresh_preview()
+
+    def _refresh_preview(self) -> None:
+        """用当前 pixels 刷新 24×24 预览 + 色块清单（导入与参数变化共用）。"""
+        if self.pixels is None or self.palette is None:
+            return
         matcher = PaletteMatcher(self.palette.rgb, self.cfg.match_threshold)
         self.match = matcher.match(self.pixels)
         self.white_idx = self.palette.whitest_index
@@ -154,9 +202,8 @@ class MainWindow(QMainWindow):
 
         n_warn = int(warn.sum())
         self.lbl_info.setText(
-            f"{os.path.basename(path)} → {len(needed)} 种颜色"
+            f"{os.path.basename(self._last_path)} → {len(needed)} 种颜色"
             + (f"，{n_warn} 格色差较大（红框，将用最近色）" if n_warn else ""))
-        self.log(f"已加载图片：{path}")
 
     # ---------- ② 框选区域 ----------
     def on_pick_roi(self) -> None:
